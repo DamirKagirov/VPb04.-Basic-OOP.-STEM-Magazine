@@ -540,9 +540,11 @@ class Subscription:
 
     @property
     def period(self) -> str:
-        if not self.issues:
+        first = self.first_issue
+        last = self.last_issue
+        if first is None or last is None:
             return "—"
-        return f"{self.first_issue.period} — {self.last_issue.period}"
+        return f"{first.period} — {last.period}"
 
     @property
     def periods(self) -> str:
@@ -973,9 +975,10 @@ def _print_customer(customer: Customer) -> None:
 
 
 def run_demo() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
         try:
-            sys.stdout.reconfigure(encoding="utf-8")
+            reconfigure(encoding="utf-8")
         except OSError:
             pass
 
