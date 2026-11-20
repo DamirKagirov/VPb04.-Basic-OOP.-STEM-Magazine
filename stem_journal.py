@@ -336,6 +336,25 @@ class Product:
     def find_issue(self, issue_id: str) -> Issue | None:
         return next((issue for issue in self.issues if issue.issue_id == issue_id), None)
 
+    def issue_at(self, year: int, month: int) -> Issue:
+        """Возвращает выпуск каталога за указанный год и месяц."""
+        year = _year(year)
+        month = _month(month)
+        issue = next(
+            (
+                candidate
+                for candidate in self.issues
+                if candidate.issue_year == year and candidate.issue_month == month
+            ),
+            None,
+        )
+        if issue is None:
+            raise CatalogError(
+                f"В каталоге продукта {self.product_id} ({self.edition}) "
+                f"нет выпуска за {_period(year, month)}"
+            )
+        return issue
+
     def issues_from(
         self, start_year: int, start_month: int, count: int | None = None
     ) -> list[Issue]:
@@ -464,6 +483,46 @@ class Subscription:
             customer_id=customer.customer_id,
             product_id=product.product_id,
             issues=issues,
+            status=SUBSCRIPTION_ACTIVE,
+            product=product,
+        )
+        customer.add_subscription(subscription)
+        return subscription
+
+    @classmethod
+    def create_single_issue(
+        cls, customer: "Customer", product: Product, issue: Issue
+    ) -> "Subscription":
+        """Оформляет покупку одного выпуска как подписку на один месяц.
+
+        Подписка получает ровно один выпуск из каталога продукта, создаётся
+        активной и сразу добавляется клиенту. Как и любая другая подписка,
+        она хранит ссылку на объект ``Issue`` из каталога, а не его копию.
+        """
+        if not isinstance(customer, Customer):
+            raise ValidationError("customer должен быть объектом Customer")
+        if not isinstance(product, Product):
+            raise ValidationError("product должен быть объектом Product")
+        if not isinstance(issue, Issue):
+            raise ValidationError("issue должен быть объектом Issue")
+        if issue.product_id != product.product_id:
+            raise ValidationError(
+                f"Выпуск {issue.issue_id} принадлежит продукту "
+                f"{issue.product_id}, а не {product.product_id}"
+            )
+
+        catalog_issue = product.find_issue(issue.issue_id)
+        if catalog_issue is None:
+            raise CatalogError(
+                f"Выпуск {issue.issue_id} отсутствует в каталоге продукта "
+                f"{product.product_id}"
+            )
+
+        subscription = cls(
+            subscription_id=_ids.next("SUB"),
+            customer_id=customer.customer_id,
+            product_id=product.product_id,
+            issues=[catalog_issue],
             status=SUBSCRIPTION_ACTIVE,
             product=product,
         )
@@ -628,6 +687,10 @@ class Customer:
                 f"Подписка {subscription.subscription_id} уже добавлена клиенту"
             )
         self.subscriptions.append(subscription)
+
+    def buy_issue(self, product: Product, issue: Issue) -> Subscription:
+        """Покупает единичный выпуск, оформляя подписку на один месяц."""
+        return Subscription.create_single_issue(self, product, issue)
 
     def active_subscriptions(self) -> list[Subscription]:
         return [
@@ -940,6 +1003,20 @@ class Journal:
             )
         return Subscription.create(customer, product, start_year, start_month)
 
+    def buy_issue(
+        self, customer: Customer, product: Product, issue: Issue
+    ) -> Subscription:
+        """Оформляет покупку клиентом единичного выпуска на один месяц."""
+        if self.customer_by_id(customer.customer_id) is None:
+            raise ValidationError(
+                f"Клиент {customer.customer_id} не добавлен в журнал"
+            )
+        if self.product_by_id(product.product_id) is None:
+            raise ValidationError(
+                f"Продукт {product.product_id} не добавлен в журнал"
+            )
+        return customer.buy_issue(product, issue)
+
     # -- Хранение ---------------------------------------------------------
 
     def save(self) -> Path:
@@ -1032,7 +1109,12 @@ def run_demo() -> None:
         "oleg.petrov@example.com",
         "г. Казань, ул. Баумана, д. 3",
     )
-    for customer in (anna, maria, oleg):
+    ilya = Customer.create(
+        "Илья Соколов",
+        "ilya.sokolov@example.com",
+        "г. Новосибирск, ул. Кирова, д. 9",
+    )
+    for customer in (anna, maria, oleg, ilya):
         journal.add_customer(customer)
         print(f"  {customer}")
 
@@ -1081,8 +1163,20 @@ def run_demo() -> None:
     print(f"  {oleg_subscription}")
     print(f"  Назначенные выпуски: {oleg_subscription.periods}")
 
-    # 8. Жизненный цикл подписок ----------------------------------------
-    _print_header("8. Статусы выпусков и подписок")
+    # 8. Покупка единичного выпуска -------------------------------------
+    _print_header("8. Илья покупает единичный выпуск 12+ за май 2026 года")
+    may_issue = stem12.issue_at(2026, 5)
+    ilya_subscription = journal.buy_issue(ilya, stem12, may_issue)
+    print(f"  Купленный выпуск: {may_issue.issue_id} ({may_issue.period})")
+    print(f"  {ilya_subscription}")
+    print(f"  Выпуски подписки: {ilya_subscription.periods}")
+    print(
+        "  Создана подписка на один месяц: "
+        f"{len(ilya_subscription.issues) == 1}"
+    )
+
+    # 9. Жизненный цикл подписок ----------------------------------------
+    _print_header("9. Статусы выпусков и подписок")
     print("  Анна: отмечаем вышедшими все выпуски, кроме последнего")
     for issue in anna_subscription.issues[:-1]:
         issue.release()
@@ -1114,13 +1208,13 @@ def run_demo() -> None:
     except StateError as exc:
         print(f"  Ожидаемая ошибка: {exc}")
 
-    # 9. Итоговое состояние ---------------------------------------------
-    _print_header("9. Итоговое состояние клиентов")
+    # 10. Итоговое состояние --------------------------------------------
+    _print_header("10. Итоговое состояние клиентов")
     for customer in journal.customers:
         _print_customer(customer)
 
-    # 10. Сохранение и загрузка JSON ------------------------------------
-    _print_header("10. Сохранение в JSON и загрузка обратно")
+    # 11. Сохранение и загрузка JSON ------------------------------------
+    _print_header("11. Сохранение в JSON и загрузка обратно")
     saved_path = journal.save()
     print(f"  Данные сохранены: {saved_path}")
     print(f"  Размер файла: {saved_path.stat().st_size} байт")
@@ -1140,6 +1234,14 @@ def run_demo() -> None:
         "  Ссылки на выпуски восстановлены как общие объекты: "
         f"{restored_subscription.issues[0] is restored_product.issues[0]}"
     )
+
+    restored_ilya = restored.require_customer(ilya.customer_id)
+    restored_single = restored_ilya.subscriptions[0]
+    print(
+        "  Подписка Ильи на один выпуск после загрузки: "
+        f"{restored_single}"
+    )
+    print(f"  Выпуски подписки: {restored_single.periods}")
 
     print()
     print("  Краткое содержимое JSON (первые 500 символов):")

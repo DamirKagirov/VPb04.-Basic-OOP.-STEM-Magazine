@@ -16,6 +16,7 @@ from stem_journal import (
     CatalogError,
     Customer,
     Issue,
+    Journal,
     JsonStorage,
     Product,
     StateError,
@@ -60,6 +61,12 @@ class ProductTests(unittest.TestCase):
         self.assertEqual(product.issue_count, 12)
         self.assertEqual(product.issues, before)
 
+    def test_issue_at(self) -> None:
+        product = make_product(6)
+        self.assertIs(product.issue_at(2026, 3), product.issues[2])
+        with self.assertRaises(CatalogError):
+            product.issue_at(2027, 1)
+
 
 class SubscriptionTests(unittest.TestCase):
     def test_create_assigns_first_package_and_adds_to_customer(self) -> None:
@@ -78,6 +85,54 @@ class SubscriptionTests(unittest.TestCase):
         second = Subscription.create(make_customer("Второй"), product, 2026, 3)
 
         self.assertIs(first.issues[2], second.issues[0])
+
+    def test_buy_single_issue_creates_one_month_subscription(self) -> None:
+        product = make_product(6)
+        customer = make_customer()
+        issue = product.issue_at(2026, 3)
+
+        subscription = customer.buy_issue(product, issue)
+
+        self.assertEqual(subscription.status, SUBSCRIPTION_ACTIVE)
+        self.assertEqual(len(subscription.issues), 1)
+        self.assertIs(subscription.issues[0], issue)
+        self.assertEqual(customer.subscriptions, [subscription])
+        self.assertEqual(subscription.period, "2026-03 — 2026-03")
+
+    def test_buy_issue_through_journal(self) -> None:
+        product = make_product(6)
+        customer = make_customer()
+        journal = Journal()
+        journal.add_product(product)
+        journal.add_customer(customer)
+
+        subscription = journal.buy_issue(customer, product, product.issue_at(2026, 5))
+
+        self.assertEqual(len(subscription.issues), 1)
+        self.assertEqual(customer.subscriptions, [subscription])
+
+    def test_buy_issue_from_foreign_product_is_rejected(self) -> None:
+        product = make_product(6)
+        other_product = make_product(6)
+        customer = make_customer()
+
+        with self.assertRaises(ValidationError):
+            customer.buy_issue(product, other_product.issue_at(2026, 1))
+        self.assertEqual(customer.subscriptions, [])
+
+    def test_buy_issue_missing_from_catalog_is_rejected(self) -> None:
+        product = make_product(6)
+        customer = make_customer()
+        detached = Issue(
+            issue_id="ISS-999",
+            product_id=product.product_id,
+            issue_year=2027,
+            issue_month=5,
+        )
+
+        with self.assertRaises(CatalogError):
+            customer.buy_issue(product, detached)
+        self.assertEqual(customer.subscriptions, [])
 
     def test_insufficient_catalog_does_not_create_subscription(self) -> None:
         product = make_product(6, months=5)
@@ -159,6 +214,22 @@ class JsonStorageTests(unittest.TestCase):
             storage = JsonStorage(Path(directory) / "missing.json")
             with self.assertRaises(StorageError):
                 storage.load()
+
+    def test_single_issue_subscription_round_trip(self) -> None:
+        product = make_product(6)
+        customer = make_customer("Покупатель выпуска")
+        subscription = customer.buy_issue(product, product.issue_at(2026, 5))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "data.json"
+            storage = JsonStorage(path)
+            storage.save([product], [customer])
+            loaded_products, loaded_customers = storage.load()
+
+        loaded_subscription = loaded_customers[0].subscriptions[0]
+        self.assertEqual(loaded_subscription.subscription_id, subscription.subscription_id)
+        self.assertEqual(len(loaded_subscription.issues), 1)
+        self.assertIs(loaded_subscription.issues[0], loaded_products[0].issues[4])
 
     def test_bad_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
